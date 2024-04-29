@@ -42,6 +42,9 @@ typedef struct{
 	int64_t   nv;
 	int64_t   parentsPerVertex;
 	int64_t   initCCCount;
+
+	// For connected components before the augmented BFS
+	int64_t * cc_components;
 } stinger_scc_internal;
 
 
