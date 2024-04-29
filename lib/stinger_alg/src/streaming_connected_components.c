@@ -60,41 +60,55 @@ inline int64_t is_delete_unsafe (int64_t * parentArray, int64_t * parentCounter,
  * GLOBAL AUGMENTED bfs to rediscover the connected components
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
 
+#define BFS_GAMMA 0.5 // Arbitrary value for now
+#define BFS_ALPHA 14 // From Beamer et. al.'s paper
+
 uint64_t stinger_global_bfs (struct stinger* S, int64_t nv, int64_t * roots, uint64_t* queue, 
 	uint64_t* level, uint64_t* parentArray, uint64_t parentsPerVertex, uint64_t* parentCounter, 
 	int64_t * component, int64_t * component_sizes)
 {	
 	int64_t qStart = 0; 
 	int64_t qEnd   = 0;
+
+	/* Important Note: To get the degree of a vertex, we can use the following code:
+	 * vdegree_t degree = stinger_vertex_degree_get(vertices, currElement);
+	*/
+	int64_t mf = 0;
+	int64_t mu = 0;
 	
-	OMP("omp parallel for")
-  	for (int i = 0; i < nv; i ++) {
-		if (roots[component[i]] < 0) {
-			// Reset the level of the vertices in the components
-			level[i] = INFINITY_MY; 
-		}
-		if (roots[i] < 0) {
-			// Otherwise these vertices are unaffected
-			component_sizes[i] = 0;
-			if (component[i] == i && roots[i] == -1) {
-				// i is a component root
-				component[i] = i;
-				component_sizes[i] = 1;
-				level[i] = 0;
-				int64_t q = stinger_int64_fetch_add(qEnd, 1);
-				queue[q] = i;
-				
+	{
+		MAP_STING(S);
+		OMP("omp parallel for")
+		for (int i = 0; i < nv; i ++) {
+			stinger_int64_fetch_add(mu, stinger_vertex_degree_get(vertices, i));
+			if (roots[component[i]] < 0) {
+				// Reset the level of the vertices in the components
+				level[i] = INFINITY_MY; 
 			}
+			if (roots[i] < 0) {
+				// Otherwise these vertices are unaffected
+				component_sizes[i] = 0;
+				if (component[i] == i && roots[i] == -1) {
+					// i is a component root
+					component[i] = i;
+					component_sizes[i] = 1;
+					level[i] = 0;
+					int64_t q = stinger_int64_fetch_add(qEnd, 1);
+					queue[q] = i;
+					stinger_int64_fetch_add(mf, stinger_vertex_degree_get(vertices, i));
+					stinger_int64_fetch_add(mu, -stinger_vertex_degree_get(vertices, i));
+					
+				}
+			}
+			roots[i] = 0;
 		}
-		roots[i] = 0;
 	}
 
 	// Top-down BFS
   	uint64_t depth = 0;
 
   	/* while queue is not empty */
-	// TODO
-  	while(qStart != qEnd && FIRST_CONDITION) {
+  	while(qStart != qEnd && mf <= mu * BFS_ALPHA) {
 		uint64_t old_qEnd = qEnd;
 
 		depth++;
@@ -116,6 +130,8 @@ uint64_t stinger_global_bfs (struct stinger* S, int64_t nv, int64_t * roots, uin
 				  queue[which] = k;
 				  component[k] = component[currElement];
 				  stinger_int64_fetch_add(component_sizes + component[currElement], 1);
+				  stinger_int64_fetch_add(mf, stinger_vertex_degree_get(vertices, k));
+				  stinger_int64_fetch_add(mu, -stinger_vertex_degree_get(vertices, k));
 				}
 			  }
 
@@ -813,9 +829,8 @@ int stinger_scc_insertion(struct stinger * S, int64_t nv,  stinger_scc_internal 
 	int64_t total_work = stinger_insertion_cc_check(S, nv, scc_internal, batch_size, action_stack, insert_stack_top);
 	
 	// The fraction of vertices at which Stinger switches to a global augmented BFS instead
-	#define STINGER_GAMMA 0.5
 
-	if (total_work < STINGER_GAMMA * nv) {
+	if (total_work < BFS_GAMMA * nv) {
 		// Do things normally
 
 		/* serial for-all insertions that joined components */
