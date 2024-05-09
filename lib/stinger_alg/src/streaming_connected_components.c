@@ -11,9 +11,11 @@
 
 #define INFINITY_MY INT64_MAX>>2
 #define EMPTY_NEIGHBOR INT64_MIN>>2
+
+
 // #define INFINITY_MY 1073741824
 // #define EMPTY_NEIGHBOR -1073741824
-
+typedef enum { false, true } bool;
 
 void stinger_scc_reset_stats(stinger_connected_components_stats* stats){
 	stats->bfs_deletes_in_tree = 0;
@@ -169,6 +171,9 @@ uint64_t stinger_global_bfs (struct stinger* S, int64_t nv, int64_t * roots, uin
 			if(LEVEL_IS_INF(k)) {
 				STINGER_FORALL_EDGES_OF_VTX_BEGIN(S, k) {
 					uint64_t currElement = STINGER_EDGE_DEST;
+					// TODO (Anika): Add my level and next level computation
+					uint64_t myLevel = level[currElement];
+				    uint64_t nextLevel = myLevel+1;
 
 					/* if k hasn't been found */
 					if(INFINITY_MY == stinger_int64_cas(level + k, INFINITY_MY, nextLevel)) {
@@ -206,6 +211,8 @@ uint64_t stinger_global_bfs (struct stinger* S, int64_t nv, int64_t * roots, uin
 				} STINGER_FORALL_EDGES_OF_VTX_END();
 			}
 		}
+		// TODO(Anika): When do we exit the while loop for bottom-up BFS?
+		if(changed) break; // this isn't right
 	}
 	
 	return;
@@ -729,12 +736,12 @@ int64_t stinger_insertion_cc_check(struct stinger * S, int64_t nv, stinger_scc_i
 			/* handles both edge directions */
 			if (Cj_size < Ci_size ||
 				(Cj_size == Ci_size && Cj_root < Ci_root)) {
-				component_map[Ci] = Cj_root;
+				scc_internal.cc_components[Cj] = Ci_root; // TODO(Anika): Changed from component_map[Ci] = Cj_root;
 				changed++;
 			}
 			if (Ci_size < Cj_size ||
 				(Ci_size == Cj_size && Ci_root < Cj_root)) {
-				component_map[Cj] = Ci_root;
+				scc_internal.cc_components[Ci] = Cj_root; // TODO(Anika): Here too
 				changed++;
 			}
 		}
@@ -749,7 +756,7 @@ int64_t stinger_insertion_cc_check(struct stinger * S, int64_t nv, stinger_scc_i
 		for (int64_t k = batch_size * 2 * 2 - 1; k > insert_stack_top; k --) {
 			int64_t Ci = scc_internal.bfs_components[action_stack[k]];
 			while (scc_internal.cc_components[Ci] != scc_internal.cc_components[scc_internal.cc_components[Ci]]) {
-				scc_internal.cc_components[i] = scc_internal.cc_components[scc_internal.cc_components[Ci]];
+				scc_internal.cc_components[k] = scc_internal.cc_components[scc_internal.cc_components[Ci]]; // TODO(Anika): changed to index k
 			}
 		}
 	}
@@ -761,14 +768,28 @@ int64_t stinger_insertion_cc_check(struct stinger * S, int64_t nv, stinger_scc_i
 	for (int64_t k = batch_size * 2 * 2 - 1; k > insert_stack_top; k --) {
 		int64_t Ci = scc_internal.bfs_components[action_stack[k]];
 		if (scc_internal.cc_components[Ci] == Ci) {
-			if (stinger_int64_cas(scc_internal.cc_components + Ci, Ci, -1) == Ci) {
-				stinger_int64_fetch_add(&total_work, scc_internal.bfs_component_sizes[Ci]);
-			}
+// 			if (stinger_int64_cas(scc_internal.cc_components + Ci, Ci, -1) == Ci) {
+// 				stinger_int64_fetch_add(&total_work,  -scc_internal.bfs_component_sizes[Ci]); 
+// 			}
+            scc_internal.cc_components[Ci] = -1;
 		} else if (scc_internal.cc_components[Ci] > 0) {
 			// This component is "affected," but it's not going to be a root
-			scc_internal.cc_components[Ci] = -2; // Control value
+            scc_internal.cc_components[Ci] = -2; // Control value
 			// This way we can avoid going over those vertices who are unaffected in the global BFS
 		}
+	}
+	
+	// Sum all elements that don't have their own root as CC component root
+	// Could do it in the loop above but couldn't figure out how to CAS w/ an unspecified value
+	OMP ("omp parallel for")
+	for (int64_t k = batch_size * 2 * 2 - 1; k > insert_stack_top; k --) {
+	    int64_t Ci = scc_internal.bfs_components[action_stack[k]];
+	    if (scc_internal.cc_components[Ci] == -2) {
+	        // Only count a component once
+	        if (stinger_int64_cas(scc_internal.cc_components + Ci, -2, -3) == -2) {
+				stinger_int64_fetch_add(&total_work, scc_internal.bfs_component_sizes[Ci]); 
+			}
+	    }
 	}
 
 	return total_work;
@@ -876,7 +897,7 @@ int stinger_scc_insertion(struct stinger * S, int64_t nv,  stinger_scc_internal 
 
 	else {
 		// Perform the global BFS pass
-		stinger_global_bfs(S, nv, scc_internal.cc_components
+		stinger_global_bfs(S, nv, scc_internal.cc_components, 
 				scc_internal.queue, scc_internal.level, scc_internal.parentArray, scc_internal.parentsPerVertex, 
 				scc_internal.parentCounter, scc_internal.bfs_components, scc_internal.bfs_component_sizes);
 		// cc_components is reset in the global bfs
