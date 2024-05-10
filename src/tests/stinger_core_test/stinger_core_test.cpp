@@ -614,7 +614,7 @@ TEST_F(StingerCoreTest, stinger_remove_vertex) {
   EXPECT_FALSE(has_edge_list) << "Vertex should have no incident edges";
 
   STINGER_FORALL_EDGES_OF_ALL_TYPES_BEGIN(S) {
-    if (STINGER_EDGE_SOURCE == 3 || STINGER_EDGE_DEST == 3) {
+    if (STINGER_EDGE_SOURCE == 3 || == 3) {
       in_edge_list = true;
     }
   } STINGER_FORALL_EDGES_OF_ALL_TYPES_END();

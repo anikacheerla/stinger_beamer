@@ -57,6 +57,161 @@ inline int64_t is_delete_unsafe (int64_t * parentArray, int64_t * parentCounter,
 	int64_t * level,int64_t parentsPerVertex, int64_t i,stinger_connected_components_stats* stats); 
 
 /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ *
+ * GLOBAL AUGMENTED bfs to rediscover the connected components
+ * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+
+#define BFS_GAMMA 0.5 // Arbitrary value for now
+#define BFS_ALPHA 14 // From Beamer et. al.'s paper
+
+uint64_t stinger_global_bfs (struct stinger* S, int64_t nv, int64_t * roots, uint64_t* queue, 
+	uint64_t* level, uint64_t* parentArray, uint64_t parentsPerVertex, uint64_t* parentCounter, 
+	int64_t * component, int64_t * component_sizes)
+{	
+	int64_t qStart = 0; 
+	int64_t qEnd   = 0;
+
+	/* Important Note: To get the degree of a vertex, we can use the following code:
+	 * vdegree_t degree = stinger_vertex_degree_get(vertices, currElement);
+	*/
+	int64_t mf = 0;
+	int64_t mu = 0;
+	
+	{
+		MAP_STING(S);
+		OMP("omp parallel for")
+		for (int i = 0; i < nv; i ++) {
+			stinger_int64_fetch_add(mu, stinger_vertex_degree_get(vertices, i));
+			if (roots[component[i]] < 0) {
+				// Reset the level of the vertices in the components
+				level[i] = INFINITY_MY; 
+			}
+			if (roots[i] < 0) {
+				// Otherwise these vertices are unaffected
+				component_sizes[i] = 0;
+				if (component[i] == i && roots[i] == -1) {
+					// i is a component root
+					component[i] = i;
+					component_sizes[i] = 1;
+					level[i] = 0;
+					int64_t q = stinger_int64_fetch_add(qEnd, 1);
+					queue[q] = i;
+					stinger_int64_fetch_add(mf, stinger_vertex_degree_get(vertices, i));
+					stinger_int64_fetch_add(mu, -stinger_vertex_degree_get(vertices, i));
+					
+				}
+			}
+			roots[i] = 0;
+		}
+	}
+
+	// Top-down BFS
+  	uint64_t depth = 0;
+
+  	/* while queue is not empty */
+  	while(qStart != qEnd && mf <= mu * BFS_ALPHA) {
+		uint64_t old_qEnd = qEnd;
+
+		depth++;
+
+		OMP("omp parallel for")
+		for(int64_t i = qStart; i < old_qEnd; i++) {
+			uint64_t currElement = queue[i];
+			uint64_t myLevel = level[currElement];
+			uint64_t nextLevel = myLevel+1;
+
+			STINGER_FORALL_EDGES_OF_VTX_BEGIN(S, currElement) {
+			  uint64_t k = STINGER_EDGE_DEST;
+
+			  /* if k hasn't been found */
+			  if(LEVEL_IS_INF(k)) {
+				/* add k to the frontier */
+				if(INFINITY_MY == stinger_int64_cas(level + k, INFINITY_MY, nextLevel)) {
+				  uint64_t which = stinger_int64_fetch_add(&qEnd, 1);
+				  queue[which] = k;
+				  component[k] = component[currElement];
+				  stinger_int64_fetch_add(component_sizes + component[currElement], 1);
+				  stinger_int64_fetch_add(mf, stinger_vertex_degree_get(vertices, k));
+				  stinger_int64_fetch_add(mu, -stinger_vertex_degree_get(vertices, k));
+				}
+			  }
+
+			  /* if k has space */
+			  if(parentCounter[k] < parentsPerVertex) {
+				if(LEVEL_EQUALS(k,nextLevel)) {
+				  uint64_t which = stinger_int64_fetch_add(parentCounter + k, 1);
+				  if(which < parentsPerVertex) {
+					/* add me to k's parents */
+					parentArray[k*parentsPerVertex+which] = currElement;
+				  } else {
+					parentCounter[k] = parentsPerVertex;
+				  }
+				} else if(LEVEL_EQUALS(k, myLevel)) {
+				  uint64_t which = stinger_int64_fetch_add(parentCounter + k, 1);
+				  if(which < parentsPerVertex) {
+					/* add me to k as a neighbor (bitwise negate for vtx 0) */
+					parentArray[k*parentsPerVertex+which] = ~currElement;
+				  } else {
+					parentCounter[k] = parentsPerVertex;
+				  }
+				}
+			  }
+			} STINGER_FORALL_EDGES_OF_VTX_END();
+		}
+		qStart = old_qEnd;
+  	}
+
+	// Now for the bottom-up BFS
+	while (1) {
+		bool changed = false;
+
+		OMP("omp parallel for")
+		for (int k = 0; k < nv; k ++) {
+			if(LEVEL_IS_INF(k)) {
+				STINGER_FORALL_EDGES_OF_VTX_BEGIN(S, k) {
+					uint64_t currElement = STINGER_EDGE_DEST;
+
+					/* if k hasn't been found */
+					if(INFINITY_MY == stinger_int64_cas(level + k, INFINITY_MY, nextLevel)) {
+						// uint64_t which = stinger_int64_fetch_add(&qEnd, 1);
+						// queue[which] = k;
+						changed = true;
+						component[k] = component[currElement];
+						stinger_int64_fetch_add(component_sizes + component[currElement], 1);
+					}
+
+					/* if k has space */
+					if(parentCounter[k] < parentsPerVertex) {
+					if(LEVEL_EQUALS(k,nextLevel)) {
+						uint64_t which = stinger_int64_fetch_add(parentCounter + k, 1);
+						if(which < parentsPerVertex) {
+						/* add me to k's parents */
+						parentArray[k*parentsPerVertex+which] = currElement;
+						} else {
+						parentCounter[k] = parentsPerVertex;
+						}
+					} else if(LEVEL_EQUALS(k, myLevel)) {
+						uint64_t which = stinger_int64_fetch_add(parentCounter + k, 1);
+						if(which < parentsPerVertex) {
+						/* add me to k as a neighbor (bitwise negate for vtx 0) */
+						parentArray[k*parentsPerVertex+which] = ~currElement;
+						} else {
+						parentCounter[k] = parentsPerVertex;
+						}
+					}
+					}
+
+					// Break away from looping over the edges, if you found enough parents/neighbors
+					if (parentCounter[k] == parentsPerVertex)
+						break;
+				} STINGER_FORALL_EDGES_OF_VTX_END();
+			}
+		}
+	}
+	
+	return;
+}
+
+/* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ *
  * bfs connected components functions
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
 
@@ -544,13 +699,89 @@ int64_t bfs_component_stats (uint64_t nv, int64_t * sizes, int64_t previous_num)
   return num_components;
 }
 
+int64_t stinger_insertion_cc_check(struct stinger * S, int64_t nv, stinger_scc_internal scc_internal,
+	int64_t batch_size, int64_t * action_stack, int64_t insert_stack_top)
+{
+	/* Begin Augmentation 
+	 * Add a parallel connected component algorithm for the roots of the components */
+	OMP("omp parallel for")
+	for (int64_t k = batch_size * 2 * 2 - 2; k > insert_stack_top; k -= 2) {
+		int64_t Ci = scc_internal.bfs_components[action_stack[k]];
+		int64_t Cj = scc_internal.bfs_components[action_stack[k+1]];
+
+		scc_internal.cc_components[Ci] = Ci;
+		scc_internal.cc_components[Cj] = Cj;
+	}
+
+	while (1) {
+		int changed = 0;
+
+		OMP("omp parallel for")
+		for (int64_t k = batch_size * 2 * 2 - 2; k > insert_stack_top; k -= 2) {
+			int64_t Ci = scc_internal.bfs_components[action_stack[k]];
+			int64_t Cj = scc_internal.bfs_components[action_stack[k+1]];
+			
+			int64_t Ci_root = scc_internal.cc_components[Ci];
+			int64_t Cj_root = scc_internal.cc_components[Cj];
+
+			int64_t Ci_size = scc_internal.bfs_component_sizes[Ci];
+			int64_t Cj_size = scc_internal.bfs_component_sizes[Cj];
+			/* handles both edge directions */
+			if (Cj_size < Ci_size ||
+				(Cj_size == Ci_size && Cj_root < Ci_root)) {
+				component_map[Ci] = Cj_root;
+				changed++;
+			}
+			if (Ci_size < Cj_size ||
+				(Ci_size == Cj_size && Ci_root < Cj_root)) {
+				component_map[Cj] = Ci_root;
+				changed++;
+			}
+		}
+
+		/* if nothing changed */
+		if (!changed) {
+			break;
+		}
+
+		/* Tree climbing with OpenMP parallel for */
+		OMP ("omp parallel for")
+		for (int64_t k = batch_size * 2 * 2 - 1; k > insert_stack_top; k --) {
+			int64_t Ci = scc_internal.bfs_components[action_stack[k]];
+			while (scc_internal.cc_components[Ci] != scc_internal.cc_components[scc_internal.cc_components[Ci]]) {
+				scc_internal.cc_components[i] = scc_internal.cc_components[scc_internal.cc_components[Ci]];
+			}
+		}
+	}
+
+	// Total number of vertices we would have to BFS over
+	int64_t total_work = 0;
+
+	OMP ("omp parallel for")
+	for (int64_t k = batch_size * 2 * 2 - 1; k > insert_stack_top; k --) {
+		int64_t Ci = scc_internal.bfs_components[action_stack[k]];
+		if (scc_internal.cc_components[Ci] == Ci) {
+			if (stinger_int64_cas(scc_internal.cc_components + Ci, Ci, -1) == Ci) {
+				stinger_int64_fetch_add(&total_work, scc_internal.bfs_component_sizes[Ci]);
+			}
+		} else if (scc_internal.cc_components[Ci] > 0) {
+			// This component is "affected," but it's not going to be a root
+			scc_internal.cc_components[Ci] = -2; // Control value
+			// This way we can avoid going over those vertices who are unaffected in the global BFS
+		}
+	}
+
+	return total_work;
+}
+
 int stinger_scc_insertion(struct stinger * S, int64_t nv,  stinger_scc_internal scc_internal, 
 	stinger_connected_components_stats* stats, stinger_edge_update* batch,int64_t batch_size){
 
 	// stinger_connected_components_stats* stats, int64_t *batch,int64_t batch_size){
   	/* Updates */
 	int64_t * action_stack = malloc(sizeof(int64_t) * batch_size * 2 * 2);
-	int64_t * action_stack_components = malloc(sizeof(int64_t) * batch_size * 2 * 2);
+	// They don't even use the following array, lol
+	//int64_t * action_stack_components = malloc(sizeof(int64_t) * batch_size * 2 * 2);
 	int64_t delete_stack_top;
 	int64_t insert_stack_top;
 
@@ -593,44 +824,65 @@ int stinger_scc_insertion(struct stinger * S, int64_t nv,  stinger_scc_internal 
 	} 
 	stats->bfs_inserts_bridged = bfs_inserts_bridged;
 
-	/* serial for-all insertions that joined components */
-	for(int64_t k = batch_size * 2 * 2 - 2; k > insert_stack_top; k -= 2) {
-	  int64_t i = action_stack[k]; 
-	  int64_t j = action_stack[k+1];
+	/* Begin Augmentation 
+	 * Add a parallel connected component algorithm for the roots of the components */
+	int64_t total_work = stinger_insertion_cc_check(S, nv, scc_internal, batch_size, action_stack, insert_stack_top);
+	
+	// The fraction of vertices at which Stinger switches to a global augmented BFS instead
 
-	  int64_t Ci = scc_internal.bfs_components[i];
-	  int64_t Cj = scc_internal.bfs_components[j];
+	if (total_work < BFS_GAMMA * nv) {
+		// Do things normally
 
-	  if(Ci == Cj)
-		continue;
+		/* serial for-all insertions that joined components */
+		for(int64_t k = batch_size * 2 * 2 - 2; k > insert_stack_top; k -= 2) {
+		int64_t i = action_stack[k]; 
+		int64_t j = action_stack[k+1];
 
-	  int64_t Ci_size = scc_internal.bfs_component_sizes[Ci];
-	  int64_t Cj_size = scc_internal.bfs_component_sizes[Cj];
+		int64_t Ci = scc_internal.bfs_components[i];
+		int64_t Cj = scc_internal.bfs_components[j];
 
-	  if(Ci_size > Cj_size) {
-		SWAP_UINT64(i,j)
-		SWAP_UINT64(Ci, Cj)
-		SWAP_UINT64(Ci_size, Cj_size)
-	  }
+		// Reset the cc_components array
+		scc_internal.cc_components[Ci] = 0;
+		scc_internal.cc_components[Cj] = 0;
 
-	  scc_internal.parentArray[i*scc_internal.parentsPerVertex] = j;
-	  scc_internal.parentCounter[i] = 1;
-	  /* handle singleton */
-	  if(Ci_size == 1) {
-		scc_internal.bfs_component_sizes[Ci] = 0;
-		scc_internal.bfs_component_sizes[Cj]++;
-		scc_internal.bfs_components[i] = Cj;
-	  } else {
-		scc_internal.bfs_component_sizes[Cj] += bfs_build_new_component(S, i, Cj, 
-			(scc_internal.level[j] >= 0 ? scc_internal.level[j] : ~scc_internal.level[j])+1, 
-			scc_internal.queue, scc_internal.level, scc_internal.parentArray, scc_internal.parentsPerVertex, 
-			scc_internal.parentCounter, scc_internal.bfs_components);
-		scc_internal.bfs_component_sizes[Ci] = 0;
-	  }
+		if(Ci == Cj)
+			continue;
+
+		int64_t Ci_size = scc_internal.bfs_component_sizes[Ci];
+		int64_t Cj_size = scc_internal.bfs_component_sizes[Cj];
+
+		if(Ci_size > Cj_size) {
+			SWAP_UINT64(i,j)
+			SWAP_UINT64(Ci, Cj)
+			SWAP_UINT64(Ci_size, Cj_size)
+		}
+
+		scc_internal.parentArray[i*scc_internal.parentsPerVertex] = j;
+		scc_internal.parentCounter[i] = 1;
+		/* handle singleton */
+		if(Ci_size == 1) {
+			scc_internal.bfs_component_sizes[Ci] = 0;
+			scc_internal.bfs_component_sizes[Cj]++;
+			scc_internal.bfs_components[i] = Cj;
+		} else {
+			scc_internal.bfs_component_sizes[Cj] += bfs_build_new_component(S, i, Cj, 
+				(scc_internal.level[j] >= 0 ? scc_internal.level[j] : ~scc_internal.level[j])+1, 
+				scc_internal.queue, scc_internal.level, scc_internal.parentArray, scc_internal.parentsPerVertex, 
+				scc_internal.parentCounter, scc_internal.bfs_components);
+			scc_internal.bfs_component_sizes[Ci] = 0;
+		}
+		}
+	}
+
+	else {
+		// Perform the global BFS pass
+		stinger_global_bfs(S, nv, scc_internal.cc_components
+				scc_internal.queue, scc_internal.level, scc_internal.parentArray, scc_internal.parentsPerVertex, 
+				scc_internal.parentCounter, scc_internal.bfs_components, scc_internal.bfs_component_sizes);
+		// cc_components is reset in the global bfs
 	}
 
 	free(action_stack);
-	free(action_stack_components);
 }
 
 int stinger_scc_deletion(struct stinger * S, int64_t nv,  stinger_scc_internal scc_internal, 
@@ -785,6 +1037,9 @@ void stinger_scc_initialize_internals(struct stinger * S, int64_t nv, stinger_sc
 	scc_internal->bfs_components	= &(scc_internal->parentsDataPtr[(parentsPerVertex + 1) * nv]);
 	scc_internal->bfs_component_sizes = &(scc_internal->parentsDataPtr[(parentsPerVertex + 2) * nv]);
 
+	// For connected components before the augmented BFS
+	scc_internal->cc_components = xmalloc(nv*sizeof(int64_t));
+
 	scc_internal->nv = nv;
 
 	OMP("omp parallel for")
@@ -808,6 +1063,9 @@ void stinger_scc_initialize_internals(struct stinger * S, int64_t nv, stinger_sc
 void stinger_scc_release_internals(stinger_scc_internal* scc_internal){
   free(scc_internal->bfsDataPtr); 
   free(scc_internal->parentsDataPtr);
+
+  // For connected components before the augmented BFS
+  free(scc_internal->cc_components);
 }
 
 
