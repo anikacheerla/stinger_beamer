@@ -173,7 +173,7 @@ uint64_t stinger_global_bfs (struct stinger* S, int64_t nv, int64_t * roots, uin
 					uint64_t currElement = STINGER_EDGE_DEST;
 					// TODO (Anika): Add my level and next level computation
 					uint64_t myLevel = level[currElement];
-				    uint64_t nextLevel = myLevel+1;
+				    uint64_t nextLevel = myLevel + 1;
 
 					/* if k hasn't been found */
 					if(INFINITY_MY == stinger_int64_cas(level + k, INFINITY_MY, nextLevel)) {
@@ -186,23 +186,23 @@ uint64_t stinger_global_bfs (struct stinger* S, int64_t nv, int64_t * roots, uin
 
 					/* if k has space */
 					if(parentCounter[k] < parentsPerVertex) {
-					if(LEVEL_EQUALS(k,nextLevel)) {
-						uint64_t which = stinger_int64_fetch_add(parentCounter + k, 1);
-						if(which < parentsPerVertex) {
-						/* add me to k's parents */
-						parentArray[k*parentsPerVertex+which] = currElement;
-						} else {
-						parentCounter[k] = parentsPerVertex;
-						}
-					} else if(LEVEL_EQUALS(k, myLevel)) {
-						uint64_t which = stinger_int64_fetch_add(parentCounter + k, 1);
-						if(which < parentsPerVertex) {
-						/* add me to k as a neighbor (bitwise negate for vtx 0) */
-						parentArray[k*parentsPerVertex+which] = ~currElement;
-						} else {
-						parentCounter[k] = parentsPerVertex;
-						}
-					}
+    					if(LEVEL_EQUALS(k,nextLevel)) {
+    						uint64_t which = stinger_int64_fetch_add(parentCounter + k, 1);
+    						if(which < parentsPerVertex) {
+    						/* add me to k's parents */
+    						parentArray[k*parentsPerVertex+which] = currElement;
+    						} else {
+    						parentCounter[k] = parentsPerVertex;
+    						}
+    					} else if(LEVEL_EQUALS(k, myLevel)) {
+    						uint64_t which = stinger_int64_fetch_add(parentCounter + k, 1);
+    						if(which < parentsPerVertex) {
+    						/* add me to k as a neighbor (bitwise negate for vtx 0) */
+    						parentArray[k*parentsPerVertex+which] = ~currElement;
+    						} else {
+    						parentCounter[k] = parentsPerVertex;
+    						}
+    					}
 					}
 
 					// Break away from looping over the edges, if you found enough parents/neighbors
@@ -212,7 +212,7 @@ uint64_t stinger_global_bfs (struct stinger* S, int64_t nv, int64_t * roots, uin
 			}
 		}
 		// TODO(Anika): When do we exit the while loop for bottom-up BFS?
-		if(changed) break; // this isn't right
+		if(!changed) break; // this isn't right
 	}
 	
 	return;
